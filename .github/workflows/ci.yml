@@ -1,0 +1,433 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+  security-events: write   # upload SARIF to GitHub Security tab
+
+env:
+  LOCAL_REGISTRY: localhost:5000
+
+# ────────────────────────────────────────────────────────────────────────────
+# Stage 1 — Lint
+# ────────────────────────────────────────────────────────────────────────────
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── Python ──────────────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install flake8
+        run: pip install flake8
+
+      - name: Lint API (flake8)
+        run: flake8 api/main.py
+
+      - name: Lint Worker (flake8)
+        run: flake8 worker/worker.py
+
+      # ── JavaScript ──────────────────────────────────────────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install frontend dev deps
+        run: cd frontend && npm install
+
+      - name: Lint Frontend (eslint)
+        run: cd frontend && npm run lint
+
+      # ── Dockerfiles ─────────────────────────────────────────────────────
+      - name: Lint API Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: api/Dockerfile
+
+      - name: Lint Worker Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: worker/Dockerfile
+
+      - name: Lint Frontend Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: frontend/Dockerfile
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Stage 2 — Unit Tests
+  # ──────────────────────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install \
+            -r api/requirements.txt \
+            -r api/requirements-test.txt
+
+      - name: Run pytest with coverage
+        run: |
+          cd api
+          python -m pytest tests/ -v \
+            --cov=. \
+            --cov-report=xml:coverage.xml \
+            --cov-report=html:htmlcov
+
+      - name: Upload coverage report as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: api/htmlcov/
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Stage 3 — Build
+  # Builds all three images, tags with git SHA + latest, and pushes to the
+  # local registry service container running inside this job (as required).
+  # Also saves images as gzipped tarballs so later jobs can load them without
+  # needing a running registry.
+  # ──────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build & Push
+    needs: test
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "sha=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Build API image
+        run: |
+          docker build \
+            -t $LOCAL_REGISTRY/api:${{ steps.sha.outputs.sha }} \
+            -t $LOCAL_REGISTRY/api:latest \
+            ./api
+
+      - name: Build Worker image
+        run: |
+          docker build \
+            -t $LOCAL_REGISTRY/worker:${{ steps.sha.outputs.sha }} \
+            -t $LOCAL_REGISTRY/worker:latest \
+            ./worker
+
+      - name: Build Frontend image
+        run: |
+          docker build \
+            -t $LOCAL_REGISTRY/frontend:${{ steps.sha.outputs.sha }} \
+            -t $LOCAL_REGISTRY/frontend:latest \
+            ./frontend
+
+      - name: Push all images to local registry
+        run: |
+          docker push $LOCAL_REGISTRY/api:${{ steps.sha.outputs.sha }}
+          docker push $LOCAL_REGISTRY/api:latest
+          docker push $LOCAL_REGISTRY/worker:${{ steps.sha.outputs.sha }}
+          docker push $LOCAL_REGISTRY/worker:latest
+          docker push $LOCAL_REGISTRY/frontend:${{ steps.sha.outputs.sha }}
+          docker push $LOCAL_REGISTRY/frontend:latest
+
+      - name: Save images as tarballs (for downstream jobs)
+        run: |
+          docker save $LOCAL_REGISTRY/api:${{ steps.sha.outputs.sha }}      | gzip > api.tar.gz
+          docker save $LOCAL_REGISTRY/worker:${{ steps.sha.outputs.sha }}   | gzip > worker.tar.gz
+          docker save $LOCAL_REGISTRY/frontend:${{ steps.sha.outputs.sha }} | gzip > frontend.tar.gz
+
+      - name: Upload image tarballs as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-images-${{ steps.sha.outputs.sha }}
+          path: "*.tar.gz"
+          retention-days: 1
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Stage 4 — Security Scan
+  # All three images are scanned regardless of whether an earlier image has
+  # a CRITICAL finding (continue-on-error). A final step fails the job if
+  # any scan found a CRITICAL. SARIF results are uploaded to GitHub Security
+  # and also saved as a regular pipeline artifact.
+  # ──────────────────────────────────────────────────────────────────────────
+  security-scan:
+    name: Security Scan (Trivy)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download image tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-images-${{ needs.build.outputs.sha }}
+
+      - name: Load images into Docker
+        run: |
+          docker load -i api.tar.gz
+          docker load -i worker.tar.gz
+          docker load -i frontend.tar.gz
+
+      - name: Scan API image
+        id: scan-api
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: "${{ env.LOCAL_REGISTRY }}/api:${{ needs.build.outputs.sha }}"
+          format: sarif
+          output: trivy-api.sarif
+          severity: CRITICAL
+          exit-code: "1"
+
+      - name: Scan Worker image
+        id: scan-worker
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: "${{ env.LOCAL_REGISTRY }}/worker:${{ needs.build.outputs.sha }}"
+          format: sarif
+          output: trivy-worker.sarif
+          severity: CRITICAL
+          exit-code: "1"
+
+      - name: Scan Frontend image
+        id: scan-frontend
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@0.20.0
+        with:
+          image-ref: "${{ env.LOCAL_REGISTRY }}/frontend:${{ needs.build.outputs.sha }}"
+          format: sarif
+          output: trivy-frontend.sarif
+          severity: CRITICAL
+          exit-code: "1"
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: "."
+          category: trivy
+
+      - name: Upload SARIF as pipeline artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-sarif-${{ needs.build.outputs.sha }}
+          path: "*.sarif"
+          retention-days: 7
+
+      # Fail the job AFTER all images have been scanned and results uploaded
+      - name: Fail if any CRITICAL vulnerabilities found
+        if: |
+          steps.scan-api.outcome == 'failure' ||
+          steps.scan-worker.outcome == 'failure' ||
+          steps.scan-frontend.outcome == 'failure'
+        run: |
+          echo "CRITICAL vulnerabilities found in one or more images:"
+          echo "  API:      ${{ steps.scan-api.outcome }}"
+          echo "  Worker:   ${{ steps.scan-worker.outcome }}"
+          echo "  Frontend: ${{ steps.scan-frontend.outcome }}"
+          echo "See the SARIF artifact or GitHub Security tab for details."
+          exit 1
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Stage 5 — Integration Test
+  # Builds the full stack on the runner, submits a job via the frontend HTTP
+  # API, polls until the worker marks it completed, asserts the correct status,
+  # then tears the stack down unconditionally.
+  # ──────────────────────────────────────────────────────────────────────────
+  integration-test:
+    name: Integration Test
+    needs: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate runtime credentials and create .env
+        id: env
+        run: |
+          PASS=$(openssl rand -hex 16)
+          echo "redis_pass=$PASS" >> "$GITHUB_OUTPUT"
+          echo "REDIS_PASSWORD=$PASS" > .env
+          echo "FRONTEND_PORT=3000" >> .env
+
+      - name: Build and start full stack
+        run: docker compose up -d --build
+
+      - name: Wait for frontend to become healthy (up to 120s)
+        run: |
+          elapsed=0
+          until docker compose ps frontend | grep -q "healthy" || [ "$elapsed" -ge 120 ]; do
+            sleep 5
+            elapsed=$((elapsed + 5))
+            echo "Waiting for stack... ${elapsed}s"
+            docker compose ps
+          done
+          if [ "$elapsed" -ge 120 ]; then
+            echo "Stack did not become healthy within 120s"
+            docker compose logs
+            exit 1
+          fi
+          echo "Stack is healthy (${elapsed}s)"
+
+      - name: Submit a job and assert it completes
+        run: |
+          SUBMIT=$(curl -sf -X POST http://localhost:3000/submit)
+          echo "Submit response: $SUBMIT"
+
+          JOB_ID=$(echo "$SUBMIT" | python3 -c \
+            "import sys, json; print(json.load(sys.stdin)['job_id'])")
+          echo "Job ID: $JOB_ID"
+
+          # Worker processes jobs in ~2 s; give it up to 30 s
+          STATUS="queued"
+          elapsed=0
+          while [ "$STATUS" != "completed" ] && [ "$elapsed" -lt 30 ]; do
+            sleep 3
+            RESP=$(curl -sf "http://localhost:3000/status/$JOB_ID")
+            STATUS=$(echo "$RESP" | python3 -c \
+              "import sys, json; print(json.load(sys.stdin).get('status', 'unknown'))")
+            echo "  [${elapsed}s] status: $STATUS"
+            elapsed=$((elapsed + 3))
+          done
+
+          if [ "$STATUS" = "completed" ]; then
+            echo "INTEGRATION TEST PASSED"
+          else
+            echo "INTEGRATION TEST FAILED — final status: '$STATUS'"
+            docker compose logs
+            exit 1
+          fi
+
+      - name: Tear down stack (always runs)
+        if: always()
+        run: docker compose down -v --remove-orphans
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Stage 6 — Deploy  (main branch pushes only)
+  #
+  # Runs entirely on the GitHub Actions runner — no external server needed.
+  #
+  # Sequence:
+  #   1. Load the exact images produced by the build job (from tarballs).
+  #   2. Tag them as the "production" image names compose expects.
+  #   3. Start the "current production" stack with --no-build.
+  #   4. Run rolling-deploy.sh which:
+  #        • Starts a canary container from the same images.
+  #        • Waits up to 60 s for the canary health check to pass.
+  #        • If healthy  → stops the old container, renames canary → canonical.
+  #        • If unhealthy → removes canary, leaves old container running, exits 1.
+  #   5. Verify final container health, then clean up.
+  # ──────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy (rolling update)
+    needs: [integration-test, build]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download built image tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-images-${{ needs.build.outputs.sha }}
+
+      - name: Load images into Docker
+        run: |
+          docker load -i api.tar.gz
+          docker load -i worker.tar.gz
+          docker load -i frontend.tar.gz
+
+      # Tag the loaded images to match the compose image: fields so that
+      # docker compose up --no-build can find them without rebuilding.
+      - name: Tag images for docker compose
+        run: |
+          SHA=${{ needs.build.outputs.sha }}
+          docker tag $LOCAL_REGISTRY/api:${SHA}      hng14-api:latest
+          docker tag $LOCAL_REGISTRY/worker:${SHA}   hng14-worker:latest
+          docker tag $LOCAL_REGISTRY/frontend:${SHA} hng14-frontend:latest
+
+      - name: Generate runtime credentials and create .env
+        id: env
+        run: |
+          PASS=$(openssl rand -hex 16)
+          echo "redis_pass=$PASS" >> "$GITHUB_OUTPUT"
+          echo "REDIS_PASSWORD=$PASS" > .env
+          echo "FRONTEND_PORT=3000" >> .env
+
+      # Start the "current production" stack using the pre-built images.
+      # --no-build ensures compose uses the tagged images above, not rebuilt ones.
+      - name: Start production stack (old version)
+        run: docker compose up -d --no-build
+
+      - name: Wait for production stack to be healthy (up to 120s)
+        run: |
+          elapsed=0
+          until docker compose ps frontend | grep -q "healthy" || [ "$elapsed" -ge 120 ]; do
+            sleep 5
+            elapsed=$((elapsed + 5))
+            echo "Waiting... ${elapsed}s"
+          done
+          if [ "$elapsed" -ge 120 ]; then
+            echo "Production stack did not become healthy"
+            docker compose logs
+            exit 1
+          fi
+          echo "Production stack healthy (${elapsed}s)"
+
+      - name: Show pre-deploy container state
+        run: |
+          echo "=== Containers before rolling update ==="
+          docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+
+      # Execute the rolling update. The script:
+      #   - Finds the running container by name (api / worker / frontend)
+      #   - Starts a canary from the new image alongside it
+      #   - Waits up to 60 s for the canary health check
+      #   - Swaps if healthy; aborts if not
+      - name: Execute rolling update
+        run: |
+          bash scripts/rolling-deploy.sh \
+            "$LOCAL_REGISTRY" \
+            "${{ needs.build.outputs.sha }}" \
+            "${{ steps.env.outputs.redis_pass }}"
+
+      - name: Verify post-deploy health
+        run: |
+          echo "=== Containers after rolling update ==="
+          docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+          echo ""
+          echo "=== Health status ==="
+          for svc in redis api worker frontend; do
+            status=$(docker inspect --format='{{.State.Health.Status}}' "$svc" 2>/dev/null \
+                     || echo "not running")
+            echo "  $svc: $status"
+          done
+
+      - name: Clean up runner
+        if: always()
+        run: docker compose down -v --remove-orphans

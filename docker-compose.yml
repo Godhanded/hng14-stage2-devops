@@ -1,0 +1,110 @@
+networks:
+  app-network:
+    driver: bridge
+
+services:
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    networks:
+      - app-network
+    # Redis is intentionally NOT exposed on the host — internal only
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: "${REDIS_CPU_LIMIT:-0.50}"
+          memory: ${REDIS_MEM_LIMIT:-128M}
+
+  api:
+    image: hng14-api:latest
+    build: ./api
+    container_name: api
+    environment:
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    networks:
+      - app-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "${API_CPU_LIMIT:-0.50}"
+          memory: ${API_MEM_LIMIT:-256M}
+
+  worker:
+    image: hng14-worker:latest
+    build: ./worker
+    container_name: worker
+    environment:
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    networks:
+      - app-network
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import time; t=float(open('/tmp/worker_heartbeat').read()); exit(0 if time.time()-t<60 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "${WORKER_CPU_LIMIT:-0.50}"
+          memory: ${WORKER_MEM_LIMIT:-128M}
+
+  frontend:
+    image: hng14-frontend:latest
+    build: ./frontend
+    container_name: frontend
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      - API_URL=${API_URL:-http://api:8000}
+    networks:
+      - app-network
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD"
+        - "node"
+        - "-e"
+        - "const h=require('http');h.get('http://localhost:3000/health',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "${FRONTEND_CPU_LIMIT:-0.50}"
+          memory: ${FRONTEND_MEM_LIMIT:-128M}
