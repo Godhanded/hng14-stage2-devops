@@ -225,12 +225,26 @@ jobs:
           severity: CRITICAL
           exit-code: "1"
 
-      - name: Upload SARIF to GitHub Security tab
-        if: always()
+      - name: Upload API SARIF to GitHub Security
+        if: always() && steps.scan-api.outcome != 'skipped'
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: "."
-          category: trivy
+          sarif_file: trivy-api.sarif
+          category: trivy-api
+
+      - name: Upload Worker SARIF to GitHub Security
+        if: always() && steps.scan-worker.outcome != 'skipped'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-worker.sarif
+          category: trivy-worker
+
+      - name: Upload Frontend SARIF to GitHub Security
+        if: always() && steps.scan-frontend.outcome != 'skipped'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-frontend.sarif
+          category: trivy-frontend
 
       - name: Upload SARIF as pipeline artifact
         if: always()
