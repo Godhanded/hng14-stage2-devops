@@ -195,7 +195,7 @@ jobs:
       - name: Scan API image
         id: scan-api
         continue-on-error: true
-        uses: aquasecurity/trivy-action@0.20.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: "${{ env.LOCAL_REGISTRY }}/api:${{ needs.build.outputs.sha }}"
           format: sarif
@@ -206,7 +206,7 @@ jobs:
       - name: Scan Worker image
         id: scan-worker
         continue-on-error: true
-        uses: aquasecurity/trivy-action@0.20.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: "${{ env.LOCAL_REGISTRY }}/worker:${{ needs.build.outputs.sha }}"
           format: sarif
@@ -217,7 +217,7 @@ jobs:
       - name: Scan Frontend image
         id: scan-frontend
         continue-on-error: true
-        uses: aquasecurity/trivy-action@0.20.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: "${{ env.LOCAL_REGISTRY }}/frontend:${{ needs.build.outputs.sha }}"
           format: sarif
