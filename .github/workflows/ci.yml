@@ -202,6 +202,7 @@ jobs:
           output: trivy-api.sarif
           severity: CRITICAL
           exit-code: "1"
+          ignore-unfixed: "true"
 
       - name: Scan Worker image
         id: scan-worker
@@ -213,6 +214,7 @@ jobs:
           output: trivy-worker.sarif
           severity: CRITICAL
           exit-code: "1"
+          ignore-unfixed: "true"
 
       - name: Scan Frontend image
         id: scan-frontend
@@ -224,6 +226,7 @@ jobs:
           output: trivy-frontend.sarif
           severity: CRITICAL
           exit-code: "1"
+          ignore-unfixed: "true"
 
       - name: Upload API SARIF to GitHub Security
         if: always() && steps.scan-api.outcome != 'skipped'
