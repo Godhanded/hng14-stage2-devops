@@ -192,41 +192,49 @@ jobs:
           docker load -i worker.tar.gz
           docker load -i frontend.tar.gz
 
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sudo sh -s -- -b /usr/local/bin
+
       - name: Scan API image
         id: scan-api
         continue-on-error: true
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: "${{ env.LOCAL_REGISTRY }}/api:${{ needs.build.outputs.sha }}"
-          format: sarif
-          output: trivy-api.sarif
-          severity: CRITICAL
-          exit-code: "1"
-          ignore-unfixed: "true"
+        run: |
+          trivy image \
+            --format sarif \
+            --output trivy-api.sarif \
+            --severity CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress \
+            "$LOCAL_REGISTRY/api:${{ needs.build.outputs.sha }}"
 
       - name: Scan Worker image
         id: scan-worker
         continue-on-error: true
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: "${{ env.LOCAL_REGISTRY }}/worker:${{ needs.build.outputs.sha }}"
-          format: sarif
-          output: trivy-worker.sarif
-          severity: CRITICAL
-          exit-code: "1"
-          ignore-unfixed: "true"
+        run: |
+          trivy image \
+            --format sarif \
+            --output trivy-worker.sarif \
+            --severity CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress \
+            "$LOCAL_REGISTRY/worker:${{ needs.build.outputs.sha }}"
 
       - name: Scan Frontend image
         id: scan-frontend
         continue-on-error: true
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: "${{ env.LOCAL_REGISTRY }}/frontend:${{ needs.build.outputs.sha }}"
-          format: sarif
-          output: trivy-frontend.sarif
-          severity: CRITICAL
-          exit-code: "1"
-          ignore-unfixed: "true"
+        run: |
+          trivy image \
+            --format sarif \
+            --output trivy-frontend.sarif \
+            --severity CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress \
+            "$LOCAL_REGISTRY/frontend:${{ needs.build.outputs.sha }}"
 
       - name: Upload API SARIF to GitHub Security
         if: always() && steps.scan-api.outcome != 'skipped'
