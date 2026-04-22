@@ -28,7 +28,7 @@ No cloud accounts are required. Everything runs locally.
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/hng14-stage2-devops.git
+git clone https://github.com/Godhanded/hng14-stage2-devops.git
 cd hng14-stage2-devops
 ```
 
@@ -131,23 +131,14 @@ lint → test → build → security-scan → integration-test → deploy
 |-------|-------------|
 | **lint** | flake8 (Python), eslint (JS), hadolint (Dockerfiles) |
 | **test** | pytest with Redis mocked; uploads HTML coverage report as artifact |
-| **build** | Builds all three images, pushes to local registry + GHCR; uploads tarballs as artifacts |
-| **security-scan** | Trivy scans all images; fails on any CRITICAL CVE; uploads SARIF to GitHub Security |
-| **integration-test** | Brings full stack up in the runner; submits a job; polls until `completed`; tears down |
-| **deploy** | *(main branch only)* SSH rolling update — new container must pass health check before old is stopped |
+| **build** | Builds all three images, tags with git SHA + latest, pushes to a local registry inside the runner; saves tarballs as artifacts for downstream jobs |
+| **security-scan** | Trivy scans all images for CRITICAL CVEs; ignores unfixed; uploads SARIF to GitHub Security tab and as a pipeline artifact |
+| **integration-test** | Brings full stack up in the runner; submits a job; polls until `completed`; tears down unconditionally |
+| **deploy** | *(main branch only)* Loads built images, starts the stack, then runs a canary rolling update — new container must pass its health check before the old one is stopped |
 
 A failure in any stage prevents all subsequent stages from running.
 
-### Required GitHub secrets for deploy
-
-Set these in **Settings → Secrets and variables → Actions**:
-
-| Secret | Value |
-|--------|-------|
-| `DEPLOY_HOST` | IP or hostname of your server |
-| `DEPLOY_USER` | SSH username on the server |
-| `DEPLOY_SSH_KEY` | Private SSH key (the server must have the public key in `~/.ssh/authorized_keys`) |
-| `REDIS_PASSWORD` | Redis password used on the server |
+> **No external secrets required.** The deploy stage runs entirely on the GitHub Actions runner — no server, no SSH keys. Redis credentials are generated randomly at runtime with `openssl rand -hex 16`.
 
 ---
 
